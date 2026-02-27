@@ -1,0 +1,158 @@
+version: "3"
+
+services:
+  # --- COORDINTATION ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "22181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # --- REAL-TIME: KAFKA ---
+  # kafka:
+  #   image: confluentinc/cp-kafka:7.3.0
+  #   hostname: kafka
+  #   container_name: kafka
+  #   depends_on:
+  #     - zookeeper
+  #   ports:
+  #     - "19092:9092"
+  #   environment:
+  #     KAFKA_BROKER_ID: 1
+  #     KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:19092
+  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+  #     KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  # --- REAL-TIME: KAFKA ---
+# --- REAL-TIME: KAFKA ---
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    hostname: kafka
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "19092:19092" # CRITICAL: Must be mapped 1:1
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      # CRITICAL: Explicitly bind to both ports
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "18080:8080"
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  dashboard:
+    image: python:3.9-slim
+    container_name: dashboard
+    volumes:
+      - ./dashboard:/app
+    working_dir: /app
+    ports:
+      - "18501:8501"
+    command: sh -c "pip install streamlit pandas sqlalchemy pymysql plotly cryptography protobuf kafka-python kazoo && streamlit run app.py"
+    depends_on:
+      - mysql
+
+  # --- STORAGE: HADOOP HDFS ---
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=test
+      - HDFS_CONF_dfs_permissions_enabled=false
+    env_file:
+      - ./hadoop.env
+    ports:
+      - "19870:9870"
+      - "19000:9000"
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    environment:
+      - HDFS_CONF_dfs_permissions_enabled=false
+    env_file:
+      - ./hadoop.env
+    links:
+      - namenode
+
+  # --- DATABASE: MySQL ---
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: retail_db
+    ports:
+      - "13307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  # --- LOG COLLECTION: FLUME ---
+  # We use a custom flume container or a standard one. 
+  # For simplicity, we can use a probablety/flume image or similar, 
+  # but often it's better to run flume manually or build a custom image.
+  # Let's use a standard lightweight java container and install flume or use a pre-built one.
+  flume:
+    build:
+      context: ./flume
+      dockerfile: Dockerfile
+    container_name: flume
+    command: flume-ng agent -n agent -c /opt/flume-config -f /opt/flume-config/flume.conf -Dflume.root.logger=INFO,console
+    environment:
+      - FLUME_AGENT_NAME=agent
+      - HADOOP_CONF_DIR=/opt/flume-config
+    volumes:
+      - ./conf/flume.conf:/opt/flume-config/flume.conf
+      - ./conf/core-site.xml:/opt/flume-config/core-site.xml
+      - ./logs:/var/log/app_logs
+    depends_on:
+      - namenode
+      - kafka
+
+  # --- ETL: SQOOP (Client Container) ---
+  # Sqoop needs Hadoop libs and MySQL connector
+  sqoop:
+    image: dvoros/sqoop:latest
+    container_name: sqoop
+    volumes:
+      - ./scripts:/scripts
+      - ./mysql-connector-java-8.0.28.jar:/usr/local/sqoop/lib/mysql-connector-java-8.0.28.jar
+    # We will keep this alive or run commands via docker run/exec
+    command: tail -f /dev/null
+    depends_on:
+      - namenode
+      - datanode
+      - mysql
+    environment:
+      - HADOOP_HOME=/usr/local/hadoop
+
+volumes:
+  namenode_data:
+  datanode_data:
+  mysql_data:
